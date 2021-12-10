@@ -7,12 +7,64 @@
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <vector>
+
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
 using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
 
 using namespace  ::match_service;
+using namespace std;
+
+struct Task
+{
+    User user;
+    string type;
+};
+
+struct MessageQueue
+{
+    queue<Task> q;
+    mutex m;
+    condition_variable cv;
+}message_queue;
+
+class Pool
+{
+    public:
+        void save_result(int a, int b){
+            printf("Match result : %d, %d\n", a, b);
+        }
+
+        void match(){
+            while (users.size() > 1){
+                User a = users[0], b = users[1];
+                users.erase(users.begin());
+                users.erase(users.begin());
+                save_result(a.id, b.id);
+            }
+        }
+
+        void add(User user){
+            users.push_back(user);
+        }
+
+        void remove(User user){
+            for (uint32_t i = 0; i < users.size(); i++) {
+                if (users[i].id == user.id) {
+                    users.erase(users.begin() + i);
+                    break;
+                }
+            }
+        }
+    private:
+        vector<User> users;
+}pool;
 
 class MatchHandler : virtual public MatchIf {
     public:
@@ -31,6 +83,14 @@ class MatchHandler : virtual public MatchIf {
         int32_t add_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("add_user\n");
+
+            //通过消息队列中的锁将方法锁着。
+            //好处:你不需要进行解锁操作，当方法执行完毕，这个变量就会自动注销
+            unique_lock<mutex> lck(message_queue.m);
+            message_queue.q.push({user, "add"});
+            //唤醒所有条件变量
+            message_queue.cv.notify_all();
+
             return 0;
         }
 
@@ -45,10 +105,38 @@ class MatchHandler : virtual public MatchIf {
         int32_t remove_user(const User& user, const std::string& info) {
             // Your implementation goes here
             printf("remove_user\n");
+
+            unique_lock<mutex> lck(message_queue.m);
+            message_queue.q.push({user, "remove"});
+            message_queue.cv.notify_all();
+
             return 0;
         }
 
 };
+void consume_task(){
+    while (true){
+        unique_lock<mutex> lck(message_queue.m);
+        if (message_queue.q.empty()){
+            /* 因为消费者线程（不止一个）会频繁判断队列是否为空，导致CPU做无用功。
+             * 所以使用条件变量的wait()函数可使得当前线程阻塞，直至条件变量唤醒。
+             * 当线程阻塞的时候，该函数会自动解锁，允许其他线程执行。
+             **/
+            message_queue.cv.wait(lck);
+        } else {
+            Task task = message_queue.q.front();
+            message_queue.q.pop();
+            lck.unlock();
+
+            if (task.type == "add") pool.add(task.user);
+            else if (task.type == "remove") pool.remove(task.user);
+
+            pool.match();
+        }
+    }
+}
+
+
 
 int main(int argc, char **argv) {
     int port = 9090;
@@ -59,6 +147,11 @@ int main(int argc, char **argv) {
     ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
 
     TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
+
+    printf("Start Match Server\n");
+
+    thread matching_thread(consume_task);
+
     server.serve();
     return 0;
 }
