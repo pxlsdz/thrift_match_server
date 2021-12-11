@@ -16,6 +16,7 @@
 #include <queue>
 #include <vector>
 #include <iostream>
+#include <unistd.h>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -48,7 +49,6 @@ class Pool
             std::shared_ptr<TProtocol> protocol(new TBinaryProtocol(transport));
             SaveClient client(protocol);
 
-            puts("w");
             try {
                 transport->open();
                 int res = client.save_data("acs_2104", "fcf05d68", a, b);
@@ -63,10 +63,21 @@ class Pool
 
         void match(){
             while (users.size() > 1){
-                User a = users[0], b = users[1];
-                users.erase(users.begin());
-                users.erase(users.begin());
-                save_result(a.id, b.id);
+                sort(users.begin(), users.end(), [&](User& a, User b){
+                        return a.score < b.score;
+                        });
+
+                bool flag = true;
+                for(uint32_t i = 1; i < users.size(); i++){
+                    User a = users[i], b = users[i - 1];
+                    if (a.score - b.score <= 50) {
+                        save_result(a.id, b.id);
+                        users.erase(users.begin() + i - 1, users.begin() + i + 1);
+                        flag = false;
+                        break;
+                    }
+                }
+                if (flag) break;
             }
         }
 
@@ -142,7 +153,11 @@ void consume_task(){
              * 所以使用条件变量的wait()函数可使得当前线程阻塞，直至条件变量唤醒。
              * 当线程阻塞的时候，该函数会自动解锁，允许其他线程执行。
              **/
-            message_queue.cv.wait(lck);
+
+            // message_queue.cv.wait(lck);
+            lck.unlock();
+            pool.match();
+            sleep(1);
         } else {
             Task task = message_queue.q.front();
             message_queue.q.pop();
